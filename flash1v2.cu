@@ -148,12 +148,12 @@ void printMatrix(T* matrix, int batch_size, int num_heads, int sequence_length, 
 int main() {
     const int batch_size = 1;
     const int num_heads = 1;
-    const int sequence_length = 2;
-    const int embedding_dimension = 2;
+    const int sequence_length = 64;
+    const int embedding_dimension = 64;
     float negative_infinity_host = -INFINITY;
 
-    const int block_size_columns = 1;
-    const int block_size_rows = 1;
+    const int block_size_columns = 32;
+    const int block_size_rows = 32;
 
     const int total_columns_in_blocks = ceil((float)sequence_length / block_size_columns);
     const int total_rows_in_blocks = ceil((float)sequence_length / block_size_rows);
@@ -166,24 +166,9 @@ int main() {
     float* key_matrix_host = new float[batch_size * num_heads * sequence_length * embedding_dimension];
     float* value_matrix_host = new float[batch_size * num_heads * sequence_length * embedding_dimension];
 
-    //initializeMatrix(query_matrix_host, batch_size * num_heads * sequence_length * embedding_dimension);
-    //initializeMatrix(key_matrix_host, batch_size * num_heads * sequence_length * embedding_dimension);
-    //initializeMatrix(value_matrix_host, batch_size * num_heads * sequence_length * embedding_dimension);
-
-    query_matrix_host[0] = 1.0;
-    query_matrix_host[1] = 2.0;
-    query_matrix_host[2] = 3.0;
-    query_matrix_host[3] = 4.0;
-
-    key_matrix_host[0] = 4.0;
-    key_matrix_host[1] = 3.0;
-    key_matrix_host[2] = 2.0;
-    key_matrix_host[3] = 1.0;
-
-    value_matrix_host[0] = 2.0;
-    value_matrix_host[1] = 1.0;
-    value_matrix_host[2] = 4.0;
-    value_matrix_host[3] = 3.0;
+    initializeMatrix(query_matrix_host, batch_size * num_heads * sequence_length * embedding_dimension);
+    initializeMatrix(key_matrix_host, batch_size * num_heads * sequence_length * embedding_dimension);
+    initializeMatrix(value_matrix_host, batch_size * num_heads * sequence_length * embedding_dimension);
 
     float* query_matrix_device = allocateDeviceMemory<float>(matrix_size);
     float* key_matrix_device = allocateDeviceMemory<float>(matrix_size);
