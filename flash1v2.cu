@@ -97,33 +97,6 @@ void initializeMatrix(T* matrix, size_t size) {
 }
 
 template <typename T>
-void writeMatrixToFile(T* matrix, const std::string& filename, int batch_size, int num_heads, int sequence_length, int embedding_dimension) {
-    std::ofstream file(filename);
-    if (!file) {
-        std::cerr << "Could not open the file!" << std::endl;
-        return;
-    }
-
-    for (int b = 0; b < batch_size; ++b) {
-        for (int h = 0; h < num_heads; ++h) {
-            for (int i = 0; i < sequence_length; ++i) {
-                for (int j = 0; j < embedding_dimension; ++j) {
-                    file << matrix[(b * num_heads * sequence_length * embedding_dimension) +
-                                   (h * sequence_length * embedding_dimension) +
-                                   (i * embedding_dimension) + j];
-                    if (j < embedding_dimension - 1) {
-                        file << ", "; 
-                    }
-                }
-                file << std::endl;
-            }
-            file << std::endl; 
-        }
-    }
-    file.close();
-}
-
-template <typename T>
 void printMatrix(T* matrix, int batch_size, int num_heads, int sequence_length, int embedding_dimension, int rowsToPrint, int colsToPrint) {
     T* host_matrix = new T[batch_size * num_heads * sequence_length * embedding_dimension];
     cudaMemcpy(host_matrix, matrix, batch_size * num_heads * sequence_length * embedding_dimension * sizeof(T), cudaMemcpyDeviceToHost);
@@ -190,21 +163,33 @@ int main() {
     dim3 grid_dim(batch_size, num_heads);
     dim3 block_dim(block_size_columns);
 
+    //cria evento pra benchmark(contagem de tempo de execucao do kernel)
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    cudaEventRecord(start); // comeca a contagem
+
     forward_kernel<<<grid_dim, block_dim, shared_memory_size>>>(
         query_matrix_device, key_matrix_device, value_matrix_device, sequence_length,
         embedding_dimension, total_columns_in_blocks, total_rows_in_blocks, block_size_columns,
         block_size_rows, softmax_scale, sum_matrix_device, max_matrix_device, output_matrix_device);
+
+    cudaEventRecord(stop);  // Para a contagem
+    cudaEventSynchronize(stop);
+
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);  // Calcula tempo
+
+    std::cout << "Tempo de execução: " << milliseconds << " ms\n";
 
     cudaDeviceSynchronize();
 
     float* output_matrix_host = new float[batch_size * num_heads * sequence_length * embedding_dimension];
     cudaMemcpy(output_matrix_host, output_matrix_device, matrix_size, cudaMemcpyDeviceToHost);
 
-    writeMatrixToFile(query_matrix_host, "query_output.csv", batch_size, num_heads, sequence_length, embedding_dimension);
-    writeMatrixToFile(key_matrix_host, "key_output.csv", batch_size, num_heads, sequence_length, embedding_dimension);
-    writeMatrixToFile(value_matrix_host, "value_output.csv", batch_size, num_heads, sequence_length, embedding_dimension);
-    writeMatrixToFile(output_matrix_host, "output_output.csv", batch_size, num_heads, sequence_length, embedding_dimension);
 
+    /* PRINT DAS MATRIZES
     int rowsToPrint = sequence_length;
     int colsToPrint = embedding_dimension;
     std::cout << "Q:\n";
@@ -215,6 +200,7 @@ int main() {
     printMatrix(value_matrix_device, batch_size, num_heads, sequence_length, embedding_dimension, rowsToPrint, colsToPrint);
     std::cout << "O:\n";
     printMatrix(output_matrix_device, batch_size, num_heads, sequence_length, embedding_dimension, rowsToPrint, colsToPrint);
+    */
 
     cudaFree(query_matrix_device);
     cudaFree(key_matrix_device);
@@ -222,6 +208,8 @@ int main() {
     cudaFree(output_matrix_device);
     cudaFree(sum_matrix_device);
     cudaFree(max_matrix_device);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
 
     delete[] query_matrix_host;
     delete[] key_matrix_host;
