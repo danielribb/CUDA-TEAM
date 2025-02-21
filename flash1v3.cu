@@ -370,8 +370,8 @@ int main() {
     cudaEventCreate(&stop);
     
     //print_matrix(Q.ptr, batch_size, num_heads, seq_len, embed_dim, "Q");
-   // print_matrix(K.ptr, batch_size, num_heads, seq_len, embed_dim, "K");
-   // print_matrix(V.ptr, batch_size, num_heads, seq_len, embed_dim, "V");
+    //print_matrix(K.ptr, batch_size, num_heads, seq_len, embed_dim, "K");
+    //print_matrix(V.ptr, batch_size, num_heads, seq_len, embed_dim, "V");
     
     cudaEventRecord(start);
     forward_kernel<<<grid, block, smem_size>>>(
@@ -397,10 +397,10 @@ int main() {
     std::cout << "Total execution time: " << ms << " ms\n";
     
     //print_matrix(O.ptr, batch_size, num_heads, seq_len, embed_dim, "Output (O)");
-   // print_matrix(dO.ptr, batch_size, num_heads, seq_len, embed_dim, "dO");
+    //print_matrix(dO.ptr, batch_size, num_heads, seq_len, embed_dim, "dO");
     //print_matrix(dQ.ptr, batch_size, num_heads, seq_len, embed_dim, "dQ");
     //print_matrix(dK.ptr, batch_size, num_heads, seq_len, embed_dim, "dK");
-   // print_matrix(dV.ptr, batch_size, num_heads, seq_len, embed_dim, "dV");
+    //print_matrix(dV.ptr, batch_size, num_heads, seq_len, embed_dim, "dV");
     
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
