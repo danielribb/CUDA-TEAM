@@ -337,7 +337,8 @@ int main() {
     DeviceArray<float> O(matrix_size, true);
     DeviceArray<float> l(vector_size, true);
     DeviceArray<float> m(vector_size);
-    cudaMemset(m.ptr, 0xFF, vector_size);  // -inf
+    float negative_infinity_host = -INFINITY;
+    cudaMemset(m.ptr, *reinterpret_cast<int*>(&negative_infinity_host), vector_size);  // -inf
     
     DeviceArray<float> dO(matrix_size);
     DeviceArray<float> dQ(matrix_size, true);
