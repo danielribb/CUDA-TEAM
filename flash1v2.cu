@@ -1,4 +1,4 @@
-// %%writefile flash.cu (needed if using colab)
+//%%writefile flash.cu (needed if running on colab)
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <iostream>
@@ -122,12 +122,12 @@ void printMatrix(T* matrix, int batch_size, int num_heads, int sequence_length, 
 }
 
 int main() {
-    //cria evento pra benchmark(contagem de tempo de execucao do kernel)
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
+    //cria evento pra benchmark(contagem de tempo de execucao do programa)
+    cudaEvent_t startP, stopP;
+    cudaEventCreate(&startP);
+    cudaEventCreate(&stopP);
 
-    cudaEventRecord(start); // comeca a contagem
+    cudaEventRecord(startP); // comeca a contagem
 
     const int batch_size = 2;
     const int num_heads = 4;
@@ -163,7 +163,11 @@ int main() {
     dim3 grid_dim(batch_size, num_heads);
     dim3 block_dim(block_size_columns);
 
-    
+    cudaEvent_t startK, stopK;
+    cudaEventCreate(&startK);
+    cudaEventCreate(&stopK);
+
+    cudaEventRecord(startK);
 
     forward_kernel<<<grid_dim, block_dim, shared_memory_size>>>(
         query_matrix_device, key_matrix_device, value_matrix_device, sequence_length,
@@ -172,6 +176,13 @@ int main() {
 
 
     cudaDeviceSynchronize();
+
+    cudaEventRecord(stopK);
+    cudaEventSynchronize(stopK);
+
+    float millisecondsK = 0;
+    cudaEventElapsedTime(&millisecondsK, startK, stopK);
+    std::cout << "Tempo de execução do kernel: " << millisecondsK << " ms\n";
 
     float* output_matrix_host = new float[batch_size * num_heads * sequence_length * embedding_dimension];
     cudaMemcpy(output_matrix_host, output_matrix_device, matrix_size, cudaMemcpyDeviceToHost);
@@ -190,13 +201,13 @@ int main() {
     printMatrix(output_matrix_device, batch_size, num_heads, sequence_length, embedding_dimension, rowsToPrint, colsToPrint);
     */
 
-    cudaEventRecord(stop);  // Para a contagem
-    cudaEventSynchronize(stop);
+    cudaEventRecord(stopP);  // Para a contagem
+    cudaEventSynchronize(stopP);
 
-    float milliseconds = 0;
-    cudaEventElapsedTime(&milliseconds, start, stop);  // Calcula tempo
+    float millisecondsP = 0;
+    cudaEventElapsedTime(&millisecondsP, startP, stopP);  // Calcula tempo
 
-    std::cout << "Tempo de execução: " << milliseconds << " ms\n";
+    std::cout << "Tempo de execução do programa: " << millisecondsP << " ms\n";
 
     cudaFree(query_matrix_device);
     cudaFree(key_matrix_device);
@@ -204,8 +215,10 @@ int main() {
     cudaFree(output_matrix_device);
     cudaFree(sum_matrix_device);
     cudaFree(max_matrix_device);
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
+    cudaEventDestroy(startP);
+    cudaEventDestroy(stopP);
+    cudaEventDestroy(startK);
+    cudaEventDestroy(stopK);
 
     delete[] query_matrix_host;
     delete[] key_matrix_host;
