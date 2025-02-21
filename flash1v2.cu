@@ -81,19 +81,19 @@ void forward_kernel(const float* query_matrix_device_pointer, const float* key_m
 template <typename T>
 T* allocateAndInitializeDeviceMemory(size_t size, bool initializeToZero = false, bool initializeToNegativeInfinity = false) {
     T* device_ptr;
-    cudaMalloc(&device_ptr, size); // No error checking
+    cudaMalloc(&device_ptr, size);
 
     if (initializeToZero) {
-        cudaMemset(device_ptr, 0, size); // No error checking
+        cudaMemset(device_ptr, 0, size);
     } else if (initializeToNegativeInfinity) {
         float negative_infinity_host = -INFINITY;
-        cudaMemset(device_ptr, *reinterpret_cast<int*>(&negative_infinity_host), size); // No error checking
+        cudaMemset(device_ptr, *reinterpret_cast<int*>(&negative_infinity_host), size);
     } else {
         curandGenerator_t generator;
-        curandCreateGenerator(&generator, CURAND_RNG_PSEUDO_DEFAULT); // No error checking
-        curandSetGeneratorOffset(generator, time(0)); // No error checking
-        curandGenerateUniform(generator, reinterpret_cast<float*>(device_ptr), size / sizeof(T)); // No error checking
-        curandDestroyGenerator(generator); // No error checking
+        curandCreateGenerator(&generator, CURAND_RNG_PSEUDO_DEFAULT);
+        curandSetGeneratorOffset(generator, time(0));
+        curandGenerateUniform(generator, reinterpret_cast<float*>(device_ptr), size / sizeof(T));
+        curandDestroyGenerator(generator);
     }
 
     return device_ptr;
@@ -151,9 +151,9 @@ int main() {
     float* query_matrix_device = allocateAndInitializeDeviceMemory<float>(matrix_size);
     float* key_matrix_device = allocateAndInitializeDeviceMemory<float>(matrix_size);
     float* value_matrix_device = allocateAndInitializeDeviceMemory<float>(matrix_size);
-    float* output_matrix_device = allocateAndInitializeDeviceMemory<float>(matrix_size, true); // Initialize to zero
-    float* sum_matrix_device = allocateAndInitializeDeviceMemory<float>(vector_size, false, false);  // Initialize to zero
-    float* max_matrix_device = allocateAndInitializeDeviceMemory<float>(vector_size, false, true); // Initialize to -INFINITY
+    float* output_matrix_device = allocateAndInitializeDeviceMemory<float>(matrix_size, true); // inicializa com zero
+    float* sum_matrix_device = allocateAndInitializeDeviceMemory<float>(vector_size, false, false);  // inicializa com zero
+    float* max_matrix_device = allocateAndInitializeDeviceMemory<float>(vector_size, false, true); // inicializa com -infinito
     cudaMemset(sum_matrix_device, 0, vector_size);
 
 
