@@ -1,4 +1,4 @@
-%%writefile flash.cu
+// %%writefile flash.cu (needed if using colab)
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <iostream>
