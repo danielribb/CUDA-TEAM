@@ -1,4 +1,3 @@
-%%writefile teste.cu
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <iostream>
@@ -9,6 +8,14 @@
 #include <cooperative_groups.h>
 
 namespace cg = cooperative_groups;
+
+// Kernel para escalonar e deslocar valores gerados por cuRAND
+__global__ void scale_shift_kernel(float* input, float* output, int n, float min_val, float scale) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        output[idx] = min_val + input[idx] * scale;
+    }
+}
 
 __global__ void forward_kernel(
     const float* __restrict__ Q, 
@@ -43,9 +50,8 @@ __global__ void forward_kernel(
     const float eps = 1e-10f;
     
     for (int row_block = 0; row_block < total_row_blocks; row_block++) {
-        // Load Q
         if (tx < block_size_row && (row_block * block_size_row + tx) < seq_len) {
-            for (int d = 0; d < embed_dim; d += 4) {  // Changed to 4 for our small example
+            for (int d = 0; d < embed_dim; d += 4) {
                 int idx = qkv_offset + (row_block * block_size_row + tx) * embed_dim + d;
                 if (d + 4 <= embed_dim) {
                     float4 q = *(float4*)&Q[idx];
@@ -58,7 +64,6 @@ __global__ void forward_kernel(
         float li = l[lm_offset + row_block * block_size_row + tx];
         
         for (int col_block = 0; col_block < total_col_blocks; col_block++) {
-            // Load K and V
             if (tx < block_size_col && (col_block * block_size_col + tx) < seq_len) {
                 for (int d = 0; d < embed_dim; d += 4) {
                     if (d + 4 <= embed_dim) {
@@ -70,7 +75,6 @@ __global__ void forward_kernel(
             }
             block.sync();
             
-            // Compute attention scores
             float row_max = -INFINITY;
             float row_sum = 0.0f;
             
@@ -84,18 +88,15 @@ __global__ void forward_kernel(
                 row_max = fmaxf(row_max, sum);
             }
             
-            // Softmax
             for (int col_idx = 0; col_idx < block_size_col && (col_block * block_size_col + col_idx) < seq_len; col_idx++) {
                 float val = expf(S_tile[tx * block_size_col + col_idx] - row_max);
                 S_tile[tx * block_size_col + col_idx] = val;
                 row_sum += val;
             }
             
-            // Update running statistics
             float m_new = fmaxf(mi, row_max);
             float l_new = expf(mi - m_new) * li + expf(row_max - m_new) * row_sum;
             
-            // Compute output
             if (tx < block_size_row && (row_block * block_size_row + tx) < seq_len) {
                 for (int d = 0; d < embed_dim; d += 4) {
                     float4 acc = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -151,8 +152,8 @@ __global__ void backward_kernel(
 {
     cg::thread_block block = cg::this_thread_block();
     
-    int bx = blockIdx.x;  // batch
-    int by = blockIdx.y;  // head
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
     int tx = threadIdx.x;
     
     int qkv_offset = (bx * gridDim.y * seq_len * embed_dim) + (by * seq_len * embed_dim);
@@ -284,11 +285,23 @@ struct DeviceArray {
     
     ~DeviceArray() { cudaFree(ptr); }
     
-    void random_init() {
+    void curand_init(float min_val = 0.01f, float max_val = 0.1f) {
         curandGenerator_t gen;
         curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);
         curandSetPseudoRandomGeneratorSeed(gen, time(0));
         curandGenerateUniform(gen, ptr, size / sizeof(T));
+        
+        // Scale and shift to desired range [min_val, max_val]
+        int n = size / sizeof(T);
+        float* temp;
+        cudaMalloc(&temp, size);
+        cudaMemcpy(temp, ptr, size, cudaMemcpyDeviceToDevice);
+        
+        int threads = 256;
+        int blocks = (n + threads - 1) / threads;
+        scale_shift_kernel<<<blocks, threads>>>(temp, ptr, n, min_val, max_val - min_val);
+        
+        cudaFree(temp);
         curandDestroyGenerator(gen);
     }
 };
@@ -317,12 +330,12 @@ void print_matrix(float* matrix, int batch_size, int num_heads, int seq_len, int
 }
 
 int main() {
-    constexpr int batch_size = 1;
-    constexpr int num_heads = 1;
-    constexpr int seq_len = 3;
-    constexpr int embed_dim = 4;
-    constexpr int block_size_col = 3;
-    constexpr int block_size_row = 3;
+    constexpr int batch_size = 2;
+    constexpr int num_heads = 8;
+    constexpr int seq_len = 2048;
+    constexpr int embed_dim = 4096;
+    constexpr int block_size_col = 256;
+    constexpr int block_size_row = 256;
     
     const int total_col_blocks = (seq_len + block_size_col - 1) / block_size_col;
     const int total_row_blocks = (seq_len + block_size_row - 1) / block_size_row;
@@ -331,41 +344,20 @@ int main() {
     size_t matrix_size = batch_size * num_heads * seq_len * embed_dim * sizeof(float);
     size_t vector_size = batch_size * num_heads * seq_len * sizeof(float);
     
-    DeviceArray<float> Q(matrix_size);
-    DeviceArray<float> K(matrix_size);
-    DeviceArray<float> V(matrix_size);
+    DeviceArray<float> Q(matrix_size); Q.curand_init(0.01f, 0.1f);
+    DeviceArray<float> K(matrix_size); K.curand_init(0.01f, 0.1f);
+    DeviceArray<float> V(matrix_size); V.curand_init(0.01f, 0.1f);
     DeviceArray<float> O(matrix_size, true);
     DeviceArray<float> l(vector_size, true);
     DeviceArray<float> m(vector_size);
     float negative_infinity_host = -INFINITY;
     cudaMemset(m.ptr, *reinterpret_cast<int*>(&negative_infinity_host), vector_size);  // -inf
     
-    DeviceArray<float> dO(matrix_size);
+    DeviceArray<float> dO(matrix_size); dO.curand_init(0.01f, 0.1f);
     DeviceArray<float> dQ(matrix_size, true);
     DeviceArray<float> dK(matrix_size, true);
     DeviceArray<float> dV(matrix_size, true);
     DeviceArray<float> S(batch_size * num_heads * seq_len * seq_len * sizeof(float));
-    
-    float h_Q[12] = {1.0f, 2.0f, 4.0f, 1.0f,
-                    4.0f, 1.0f, 2.0f, 1.0f,
-                    1.0f, 3.0f, 1.0f, 4.0f};
-                    
-    float h_K[12] = {1.0f, 1.0f, 2.0f, 3.0f,
-                    0.0f, 1.0f, 2.0f, 5.0f,
-                    1.0f, 2.0f, 1.0f, 3.0f};
-                    
-    float h_V[12] = {1.0f, 2.0f, 3.0f, 4.0f,
-                    5.0f, 6.0f, 7.0f, 8.0f,
-                    9.0f, 10.0f, 11.0f, 12.0f};
-                    
-    float h_dO[12] = {0.1f, 0.2f, 0.3f, 0.4f,
-                     0.5f, 0.6f, 0.7f, 0.8f,
-                     0.9f, 1.0f, 1.1f, 1.2f};
-
-    cudaMemcpy(Q.ptr, h_Q, matrix_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(K.ptr, h_K, matrix_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(V.ptr, h_V, matrix_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(dO.ptr, h_dO, matrix_size, cudaMemcpyHostToDevice);
     
     dim3 grid(batch_size, num_heads);
     dim3 block(block_size_row);
@@ -377,9 +369,9 @@ int main() {
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     
-    print_matrix(Q.ptr, batch_size, num_heads, seq_len, embed_dim, "Q");
-    print_matrix(K.ptr, batch_size, num_heads, seq_len, embed_dim, "K");
-    print_matrix(V.ptr, batch_size, num_heads, seq_len, embed_dim, "V");
+    //print_matrix(Q.ptr, batch_size, num_heads, seq_len, embed_dim, "Q");
+   // print_matrix(K.ptr, batch_size, num_heads, seq_len, embed_dim, "K");
+   // print_matrix(V.ptr, batch_size, num_heads, seq_len, embed_dim, "V");
     
     cudaEventRecord(start);
     forward_kernel<<<grid, block, smem_size>>>(
@@ -404,11 +396,11 @@ int main() {
     cudaEventElapsedTime(&ms, start, stop);
     std::cout << "Total execution time: " << ms << " ms\n";
     
-    print_matrix(O.ptr, batch_size, num_heads, seq_len, embed_dim, "Output (O)");
-    print_matrix(dO.ptr, batch_size, num_heads, seq_len, embed_dim, "dO");
-    print_matrix(dQ.ptr, batch_size, num_heads, seq_len, embed_dim, "dQ");
-    print_matrix(dK.ptr, batch_size, num_heads, seq_len, embed_dim, "dK");
-    print_matrix(dV.ptr, batch_size, num_heads, seq_len, embed_dim, "dV");
+    //print_matrix(O.ptr, batch_size, num_heads, seq_len, embed_dim, "Output (O)");
+   // print_matrix(dO.ptr, batch_size, num_heads, seq_len, embed_dim, "dO");
+    //print_matrix(dQ.ptr, batch_size, num_heads, seq_len, embed_dim, "dQ");
+    //print_matrix(dK.ptr, batch_size, num_heads, seq_len, embed_dim, "dK");
+   // print_matrix(dV.ptr, batch_size, num_heads, seq_len, embed_dim, "dV");
     
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
