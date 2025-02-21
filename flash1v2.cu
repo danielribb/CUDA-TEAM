@@ -1,11 +1,11 @@
+%%writefile flash.cu
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <iostream>
-#include <random>
-#include <fstream>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <curand.h>
 
 __global__
 void forward_kernel(const float* query_matrix_device_pointer, const float* key_matrix_device_pointer, const float* value_matrix_device_pointer, const int sequence_length, const int embedding_dimension,
@@ -79,21 +79,24 @@ void forward_kernel(const float* query_matrix_device_pointer, const float* key_m
 }
 
 template <typename T>
-T* allocateDeviceMemory(size_t size) {
+T* allocateAndInitializeDeviceMemory(size_t size, bool initializeToZero = false, bool initializeToNegativeInfinity = false) {
     T* device_ptr;
-    cudaMalloc(&device_ptr, size);
-    return device_ptr;
-}
+    cudaMalloc(&device_ptr, size); // No error checking
 
-template <typename T>
-void initializeMatrix(T* matrix, size_t size) {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<T> dis(0.0, 1.0);
-
-    for (size_t i = 0; i < size; ++i) {
-        matrix[i] = dis(gen);
+    if (initializeToZero) {
+        cudaMemset(device_ptr, 0, size); // No error checking
+    } else if (initializeToNegativeInfinity) {
+        float negative_infinity_host = -INFINITY;
+        cudaMemset(device_ptr, *reinterpret_cast<int*>(&negative_infinity_host), size); // No error checking
+    } else {
+        curandGenerator_t generator;
+        curandCreateGenerator(&generator, CURAND_RNG_PSEUDO_DEFAULT); // No error checking
+        curandSetGeneratorOffset(generator, time(0)); // No error checking
+        curandGenerateUniform(generator, reinterpret_cast<float*>(device_ptr), size / sizeof(T)); // No error checking
+        curandDestroyGenerator(generator); // No error checking
     }
+
+    return device_ptr;
 }
 
 template <typename T>
@@ -119,14 +122,20 @@ void printMatrix(T* matrix, int batch_size, int num_heads, int sequence_length, 
 }
 
 int main() {
-    const int batch_size = 1;
-    const int num_heads = 1;
-    const int sequence_length = 64;
-    const int embedding_dimension = 64;
-    float negative_infinity_host = -INFINITY;
+    //cria evento pra benchmark(contagem de tempo de execucao do kernel)
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
 
-    const int block_size_columns = 32;
-    const int block_size_rows = 32;
+    cudaEventRecord(start); // comeca a contagem
+
+    const int batch_size = 2;
+    const int num_heads = 4;
+    const int sequence_length = 2048;
+    const int embedding_dimension = 4096;
+
+    const int block_size_columns = 128;
+    const int block_size_rows = 128;
 
     const int total_columns_in_blocks = ceil((float)sequence_length / block_size_columns);
     const int total_rows_in_blocks = ceil((float)sequence_length / block_size_rows);
@@ -139,23 +148,14 @@ int main() {
     float* key_matrix_host = new float[batch_size * num_heads * sequence_length * embedding_dimension];
     float* value_matrix_host = new float[batch_size * num_heads * sequence_length * embedding_dimension];
 
-    initializeMatrix(query_matrix_host, batch_size * num_heads * sequence_length * embedding_dimension);
-    initializeMatrix(key_matrix_host, batch_size * num_heads * sequence_length * embedding_dimension);
-    initializeMatrix(value_matrix_host, batch_size * num_heads * sequence_length * embedding_dimension);
-
-    float* query_matrix_device = allocateDeviceMemory<float>(matrix_size);
-    float* key_matrix_device = allocateDeviceMemory<float>(matrix_size);
-    float* value_matrix_device = allocateDeviceMemory<float>(matrix_size);
-    float* output_matrix_device = allocateDeviceMemory<float>(matrix_size);
-    float* sum_matrix_device = allocateDeviceMemory<float>(vector_size);
-    float* max_matrix_device = allocateDeviceMemory<float>(vector_size);
-
-    cudaMemcpy(query_matrix_device, query_matrix_host, matrix_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(key_matrix_device, key_matrix_host, matrix_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(value_matrix_device, value_matrix_host, matrix_size, cudaMemcpyHostToDevice);
-    cudaMemset(output_matrix_device, 0, matrix_size);
+    float* query_matrix_device = allocateAndInitializeDeviceMemory<float>(matrix_size);
+    float* key_matrix_device = allocateAndInitializeDeviceMemory<float>(matrix_size);
+    float* value_matrix_device = allocateAndInitializeDeviceMemory<float>(matrix_size);
+    float* output_matrix_device = allocateAndInitializeDeviceMemory<float>(matrix_size, true); // Initialize to zero
+    float* sum_matrix_device = allocateAndInitializeDeviceMemory<float>(vector_size, false, false);  // Initialize to zero
+    float* max_matrix_device = allocateAndInitializeDeviceMemory<float>(vector_size, false, true); // Initialize to -INFINITY
     cudaMemset(sum_matrix_device, 0, vector_size);
-    cudaMemset(max_matrix_device, *reinterpret_cast<int*>(&negative_infinity_host), vector_size); 
+
 
     const int shared_memory_size = (4 * block_size_columns * embedding_dimension * sizeof(float)) +
                                    (block_size_columns * block_size_rows * sizeof(float));
@@ -163,25 +163,13 @@ int main() {
     dim3 grid_dim(batch_size, num_heads);
     dim3 block_dim(block_size_columns);
 
-    //cria evento pra benchmark(contagem de tempo de execucao do kernel)
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-
-    cudaEventRecord(start); // comeca a contagem
+    
 
     forward_kernel<<<grid_dim, block_dim, shared_memory_size>>>(
         query_matrix_device, key_matrix_device, value_matrix_device, sequence_length,
         embedding_dimension, total_columns_in_blocks, total_rows_in_blocks, block_size_columns,
         block_size_rows, softmax_scale, sum_matrix_device, max_matrix_device, output_matrix_device);
 
-    cudaEventRecord(stop);  // Para a contagem
-    cudaEventSynchronize(stop);
-
-    float milliseconds = 0;
-    cudaEventElapsedTime(&milliseconds, start, stop);  // Calcula tempo
-
-    std::cout << "Tempo de execução: " << milliseconds << " ms\n";
 
     cudaDeviceSynchronize();
 
@@ -202,6 +190,14 @@ int main() {
     printMatrix(output_matrix_device, batch_size, num_heads, sequence_length, embedding_dimension, rowsToPrint, colsToPrint);
     */
 
+    cudaEventRecord(stop);  // Para a contagem
+    cudaEventSynchronize(stop);
+
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);  // Calcula tempo
+
+    std::cout << "Tempo de execução: " << milliseconds << " ms\n";
+
     cudaFree(query_matrix_device);
     cudaFree(key_matrix_device);
     cudaFree(value_matrix_device);
@@ -218,3 +214,7 @@ int main() {
 
     return 0;
 }
+
+// if running the code on colab, use these commands
+//!nvcc -o flash flash.cu -lcudart -lcurand
+//!./flash
