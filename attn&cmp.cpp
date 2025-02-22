@@ -53,7 +53,7 @@ void attention(const float* queries, size_t num_queries, size_t dim,
     }
 }
 
-bool compareMatrices(const float* matA, const float* matB, size_t rows, size_t cols, float tolerance = 1e-5f) {
+bool compareMatrices(const float* matA, const float* matB, size_t rows, size_t cols, float tolerance = 1e-6f) {
     size_t totalElements = rows * cols;
     for (size_t i = 0; i < totalElements; ++i) {
         if (std::fabs(matA[i] - matB[i]) > tolerance) {
