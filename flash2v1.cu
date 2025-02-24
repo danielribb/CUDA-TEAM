@@ -1,3 +1,4 @@
+//%%writefile flash2.cu
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <iostream>
@@ -7,6 +8,7 @@
 #include <curand.h>
 #include <cooperative_groups.h>
 #include <time.h>
+#include <cmath>
 
 namespace cg = cooperative_groups;
 
@@ -78,8 +80,8 @@ __global__ void flash_attention_2_forward(
         float li = (row_idx < seq_len) ? l[lm_offset + row_idx] : 0.0f;
 
         for (int col_block = 0; col_block < total_col_blocks; col_block++) {
-            int col_idx = col_block * block_size_col + ty;
-            if (ty < block_size_col && col_idx < seq_len) {
+            int col_idx = col_block * blockDim.y + ty;
+            if (ty < blockDim.y && col_idx < seq_len) {
                 for (int d = 0; d < embed_dim; d++) {
                     K_tile[ty * embed_dim + d] = K[qkv_offset + col_idx * embed_dim + d];
                     V_tile[ty * embed_dim + d] = V[qkv_offset + col_idx * embed_dim + d];
@@ -158,7 +160,7 @@ __global__ void flash_attention_2_backward(
     int ty = threadIdx.y; // índice da coluna
 
     int qkv_offset = (bx * gridDim.y * seq_len * embed_dim) + (by * seq_len * embed_dim);
-    int lm_offset = (bx * gridDim.y * seq_len) + (by * seq_len);
+    //int lm_offset = (bx * gridDim.y * seq_len) + (by * seq_len);
 
     extern __shared__ float s[];
     float* Q_tile = s;
@@ -180,8 +182,8 @@ __global__ void flash_attention_2_backward(
             }
         }
 
-        float mi = (row_idx < seq_len) ? m[lm_offset + row_idx] : -INFINITY;
-        float li = (row_idx < seq_len) ? l[lm_offset + row_idx] : 0.0f;
+        //float mi = (row_idx < seq_len) ? m[lm_offset + row_idx] : -INFINITY;
+        //float li = (row_idx < seq_len) ? l[lm_offset + row_idx] : 0.0f;
 
         for (int col_block = 0; col_block < total_col_blocks; col_block++) {
             int col_idx = col_block * block_size_col + ty;
@@ -268,30 +270,30 @@ template <typename T>
 struct DeviceArray {
     T* ptr;
     size_t size;
-    
+
     DeviceArray(size_t s, bool zero_init = false) : size(s) {
         CUDA_CHECK(cudaMalloc(&ptr, size));
         if (zero_init) CUDA_CHECK(cudaMemset(ptr, 0, size));
     }
-    
+
     ~DeviceArray() { cudaFree(ptr); }
-    
+
     void curand_init(float min_val = 0.01f, float max_val = 0.1f) {
         curandGenerator_t gen;
         CURAND_CHECK(curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT));
         CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(gen, time(0)));
         CURAND_CHECK(curandGenerateUniform(gen, ptr, size / sizeof(T)));
-        
+
         int n = size / sizeof(T);
         float* temp;
         CUDA_CHECK(cudaMalloc(&temp, size));
         CUDA_CHECK(cudaMemcpy(temp, ptr, size, cudaMemcpyDeviceToDevice));
-        
+
         int threads = 256;
         int blocks = (n + threads - 1) / threads;
         scale_shift_kernel<<<blocks, threads>>>(temp, ptr, n, min_val, max_val - min_val);
         CUDA_CHECK(cudaGetLastError());
-        
+
         CUDA_CHECK(cudaFree(temp));
         CURAND_CHECK(curandDestroyGenerator(gen));
     }
@@ -300,7 +302,7 @@ struct DeviceArray {
 void print_matrix(float* matrix, int batch_size, int num_heads, int seq_len, int embed_dim, const char* name) {
     float* host_matrix = new float[batch_size * num_heads * seq_len * embed_dim];
     CUDA_CHECK(cudaMemcpy(host_matrix, matrix, batch_size * num_heads * seq_len * embed_dim * sizeof(float), cudaMemcpyDeviceToHost));
-    
+
     std::cout << "\n" << name << ":\n";
     for (int b = 0; b < batch_size; b++) {
         std::cout << "Batch " << b << ":\n";
@@ -319,76 +321,167 @@ void print_matrix(float* matrix, int batch_size, int num_heads, int seq_len, int
     delete[] host_matrix;
 }
 
+float dotProduct(const float* a, const float* b, size_t length) {
+    float produto = 0.0f;
+    for (size_t i = 0; i < length; ++i)
+        produto += a[i] * b[i];
+    return produto;
+}
+
+float* softmax(const float* scores, size_t n) {
+    float* exp_scores = new float[n];
+    float soma_exp = 0.0f;
+    for (size_t i = 0; i < n; ++i) {
+        exp_scores[i] = std::exp(scores[i]);
+        soma_exp += exp_scores[i];
+    }
+    for (size_t i = 0; i < n; ++i)
+        exp_scores[i] /= soma_exp;
+    return exp_scores;
+}
+
+void attention(const float* queries, size_t num_queries, size_t dim,
+               const float* keys, size_t num_keys,
+               const float* values, size_t value_dim,
+               float* output) {
+    for (size_t i = 0; i < num_queries; ++i) {
+        const float* query = queries + i * dim;
+        float escala = std::sqrt(static_cast<float>(dim));
+
+        float* scores = new float[num_keys];
+        for (size_t j = 0; j < num_keys; ++j) {
+            const float* key = keys + j * dim;
+            scores[j] = dotProduct(query, key, dim) / escala;
+        }
+
+        float* pesos = softmax(scores, num_keys);
+
+        float* out_query = output + i * value_dim;
+        for (size_t k = 0; k < value_dim; ++k)
+            out_query[k] = 0.0f;
+
+        for (size_t j = 0; j < num_keys; ++j) {
+            const float* value = values + j * value_dim;
+            for (size_t k = 0; k < value_dim; ++k)
+                out_query[k] += pesos[j] * value[k];
+        }
+
+        delete[] scores;
+        delete[] pesos;
+    }
+}
+
+bool compareMatrices(const float* matA, const float* matB, size_t rows, size_t cols, float tolerance = 1e-5f) {
+    size_t totalElements = rows * cols;
+    for (size_t i = 0; i < totalElements; ++i) {
+        if (std::fabs(matA[i] - matB[i]) > tolerance) {
+            return false;
+        }
+    }
+    return true;
+}
+
 int main() {
-    constexpr int batch_size = 2;
-    constexpr int num_heads = 8;
-    constexpr int seq_len = 512;
-    const int embed_dim = 1024;  
-    constexpr int block_size_col = 64;
-    constexpr int block_size_row = 64;
-    
+    constexpr int batch_size = 1;
+    constexpr int num_heads = 1;
+    constexpr int seq_len = 32;
+    const int embed_dim = 32;
+    float negative_infinity_host = -INFINITY;
+
     const float scale = 1.0f / sqrtf(embed_dim);
-    
+
     size_t matrix_size = batch_size * num_heads * seq_len * embed_dim * sizeof(float);
     size_t vector_size = batch_size * num_heads * seq_len * sizeof(float);
-    
+
     DeviceArray<float> Q(matrix_size); Q.curand_init(0.01f, 0.1f);
     DeviceArray<float> K(matrix_size); K.curand_init(0.01f, 0.1f);
     DeviceArray<float> V(matrix_size); V.curand_init(0.01f, 0.1f);
     DeviceArray<float> O(matrix_size, true);
     DeviceArray<float> l(vector_size, true);
     DeviceArray<float> m(vector_size);
-    CUDA_CHECK(cudaMemset(m.ptr, *reinterpret_cast<int*>(&(-INFINITY)), vector_size));
-    
+    CUDA_CHECK(cudaMemset(m.ptr, *reinterpret_cast<int*>(&negative_infinity_host), vector_size));
+
     DeviceArray<float> dO(matrix_size); dO.curand_init(0.01f, 0.1f);
     DeviceArray<float> dQ(matrix_size, true);
     DeviceArray<float> dK(matrix_size, true);
     DeviceArray<float> dV(matrix_size, true);
-    
-    dim3 grid(batch_size, num_heads);
-    dim3 block(block_size_row, block_size_col);
-    size_t smem_size = (block_size_row * embed_dim + 
-                        2 * block_size_col * embed_dim + 
-                        block_size_row * block_size_col) * sizeof(float);
-    
+
+    dim3 blockDim(16,16);
+    dim3 gridDim((embed_dim + blockDim.x - 1)/blockDim.x, (seq_len + blockDim.y - 1)/blockDim.y);
+    dim3 block(blockDim.x, blockDim.y);
+    size_t smem_size = (blockDim.x * embed_dim +
+                        2 * blockDim.y * embed_dim +
+                        blockDim.x * blockDim.y) * sizeof(float);
+
     cudaEvent_t start, stop;
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
-    
-    print_matrix(Q.ptr, batch_size, num_heads, seq_len, embed_dim, "Q");
-    print_matrix(K.ptr, batch_size, num_heads, seq_len, embed_dim, "K");
-    print_matrix(V.ptr, batch_size, num_heads, seq_len, embed_dim, "V");
-    
+
+    //print_matrix(Q.ptr, batch_size, num_heads, seq_len, embed_dim, "Q");
+    //print_matrix(K.ptr, batch_size, num_heads, seq_len, embed_dim, "K");
+    //print_matrix(V.ptr, batch_size, num_heads, seq_len, embed_dim, "V");
+
     CUDA_CHECK(cudaEventRecord(start));
-    flash_attention_2_forward<<<grid, block, smem_size>>>(
+    flash_attention_2_forward<<<gridDim, blockDim, smem_size>>>(
         Q.ptr, K.ptr, V.ptr, O.ptr, l.ptr, m.ptr,
-        seq_len, embed_dim, block_size_row, block_size_col, scale
+        seq_len, embed_dim, blockDim.x, blockDim.y, scale
     );
     CUDA_CHECK(cudaDeviceSynchronize());
-    
+
+    float output[seq_len * embed_dim];
+    float* query_matrix = new float[batch_size * num_heads * seq_len * embed_dim];
+    float* key_matrix = new float[batch_size * num_heads * seq_len * embed_dim];
+    float* value_matrix = new float[batch_size * num_heads * seq_len * embed_dim];
+    float* output_matrix = new float[batch_size * num_heads * seq_len * embed_dim];
+    CUDA_CHECK(cudaMemcpy(query_matrix, Q.ptr, batch_size * num_heads * seq_len * embed_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(key_matrix, K.ptr, batch_size * num_heads * seq_len * embed_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(value_matrix, V.ptr, batch_size * num_heads * seq_len * embed_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(output_matrix, O.ptr, batch_size * num_heads * seq_len * embed_dim * sizeof(float), cudaMemcpyDeviceToHost));
+
+    attention(query_matrix, seq_len, embed_dim, key_matrix, seq_len, value_matrix, embed_dim, output);
+
+    if (compareMatrices(output_matrix, output, seq_len, embed_dim)) {
+        std::cout << "matrix1 e matrix2 são iguais." << std::endl;
+    } else {
+        std::cout << "matrix1 e matrix2 são diferentes." << std::endl;
+    }
+
+
     print_matrix(O.ptr, batch_size, num_heads, seq_len, embed_dim, "Output (O)");
-    print_matrix(dO.ptr, batch_size, num_heads, seq_len, embed_dim, "dO");
-    
-    flash_attention_2_backward<<<grid, block, smem_size>>>(
+
+    for (size_t i = 0; i < seq_len; i++) {
+        std::cout << "Resultado da atenção para a query " << i + 1 << ": ";
+        for (size_t j = 0; j < embed_dim; j++) {
+            std::cout << output[i * embed_dim + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+    //print_matrix(dO.ptr, batch_size, num_heads, seq_len, embed_dim, "dO");
+
+    /* flash_attention_2_backward<<<grid, block, smem_size>>>(
         Q.ptr, K.ptr, V.ptr, dO.ptr, l.ptr, m.ptr,
         dQ.ptr, dK.ptr, dV.ptr,
-        seq_len, embed_dim, block_size_row, block_size_col, scale
+        seq_len, embed_dim, blockDim.x, blockDim.y, scale
     );
-    CUDA_CHECK(cudaDeviceSynchronize());
-    
+    CUDA_CHECK(cudaDeviceSynchronize()); */
+
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
-    
+
     float ms;
     CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
     std::cout << "Tempo total de execução (forward + backward): " << ms << " ms\n";
-    
-    print_matrix(dQ.ptr, batch_size, num_heads, seq_len, embed_dim, "dQ");
-    print_matrix(dK.ptr, batch_size, num_heads, seq_len, embed_dim, "dK");
-    print_matrix(dV.ptr, batch_size, num_heads, seq_len, embed_dim, "dV");
-    
+
+    //print_matrix(dQ.ptr, batch_size, num_heads, seq_len, embed_dim, "dQ");
+    //print_matrix(dK.ptr, batch_size, num_heads, seq_len, embed_dim, "dK");
+    //print_matrix(dV.ptr, batch_size, num_heads, seq_len, embed_dim, "dV");
+
     CUDA_CHECK(cudaEventDestroy(start));
     CUDA_CHECK(cudaEventDestroy(stop));
-    
+    //delete[] query_matrix;
+    //delete[] key_matrix;
+    //delete[] value_matrix;
+    //delete[] output_matrix;
+
     return 0;
 }
