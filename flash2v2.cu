@@ -8,7 +8,7 @@
 #include <cmath>
 #include <cuda_runtime.h>
 
-#define EPSILON 1e-6f 
+#define EPSILON 1e-4f 
 #define BLOCK_SIZE_Q 64  
 #define BLOCK_SIZE_KV 32   
 #define THREADS_PER_BLOCK 128  
