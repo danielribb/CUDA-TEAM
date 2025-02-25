@@ -128,18 +128,16 @@ void printMatrix(T* matrix, int batch_size, int num_heads, int sequence_length, 
 }
 
 int main() {
-    cudaEvent_t startP, stopP;
-    cudaEventCreate(&startP);
-    cudaEventCreate(&stopP);
-    cudaEventRecord(startP); 
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start); 
     const int batch_size = 2;
     const int num_heads = 4;
     const int sequence_length = 512;
-    const int embedding_dimension = 1024;
-
+    const int embedding_dimension = 1024;    
     
-    
-    const int block_size_columns = 2;
+    const int block_size_columns =2;
     const int block_size_rows = 2;
 
     const int total_columns_in_blocks = ceil((float)sequence_length / block_size_columns);
@@ -202,14 +200,20 @@ int main() {
     //printMatrix(value_matrix_device, batch_size, num_heads, sequence_length, embedding_dimension, rowsToPrint, colsToPrint);
     std::cout << "O:\n";
     printMatrix(output_matrix_device, batch_size, num_heads, sequence_length, embedding_dimension, rowsToPrint, colsToPrint);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
 
+    float ms;
+    cudaEventElapsedTime(&ms, start, stop);
+    std::cout << "Tempo total de execução (forward + backward): " << ms << " ms\n";
     cudaFree(query_matrix_device);
     cudaFree(key_matrix_device);
     cudaFree(value_matrix_device);
     cudaFree(output_matrix_device);
     cudaFree(sum_matrix_device);
     cudaFree(max_matrix_device);
-
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
 
     return 0;
 }
