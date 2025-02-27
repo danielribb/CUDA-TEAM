@@ -82,10 +82,52 @@ __global__ void blockwise_attention_kernel(
     L[r] = logSumExp;
 }
 
+void cpu_attention(const float* Q, const float* K, const float* V, float* O, float* L, int N, int D) {
+    for (int i = 0; i < N; i++) {
+        float rowMax = -INFINITY;
+        for (int j = 0; j < N; j++) {
+            float s = 0;
+            const float* qRow = Q + i*D;
+            const float* kRow = K + j*D;
+            for (int c = 0; c < D; c++) {
+                s += qRow[c] * kRow[c];
+            }
+            if (s > rowMax) rowMax = s;
+        }
+        float sumExp = 0;
+        for (int j = 0; j < N; j++) {
+            float s = 0;
+            const float* qRow = Q + i*D;
+            const float* kRow = K + j*D;
+            for (int c = 0; c < D; c++) {
+                s += qRow[c] * kRow[c];
+            }
+            s = expf(s - rowMax);
+            sumExp += s;
+        }
+        for (int c = 0; c < D; c++) {
+            O[i*D + c] = 0;
+        }
+        for (int j = 0; j < N; j++) {
+            float s = 0;
+            const float* qRow = Q + i*D;
+            const float* kRow = K + j*D;
+            for (int c = 0; c < D; c++) {
+                s += qRow[c] * kRow[c];
+            }
+            s = expf(s - rowMax) / sumExp;
+            const float* vRow = V + j*D;
+            for (int c = 0; c < D; c++) {
+                O[i*D + c] += s * vRow[c];
+            }
+        }
+        L[i] = rowMax + logf(sumExp);
+    }
+}
+
 int main() {
-    std::cout << "Iniciando blockwise_attention para 4096x4096...\n";
-    static const int N  = 4096;
-    static const int D  = 4096;
+    static const int N  = 1024;
+    static const int D  = 1024;
     static const int BC = 64;
     size_t sz = (size_t)N * D;
     float *h_Q = new float[sz];
@@ -93,6 +135,8 @@ int main() {
     float *h_V = new float[sz];
     float *h_O = new float[sz];
     float *h_L = new float[N];
+    float *h_O_ref = new float[sz];
+    float *h_L_ref = new float[N];
     for (size_t i = 0; i < sz; i++) {
         h_Q[i] = 1.0f + 0.00001f*(i % 104);
         h_K[i] = 2.0f + 0.00002f*(i % 89);
@@ -110,21 +154,35 @@ int main() {
     dim3 grid(N, 1, 1);
     dim3 block(32, 1, 1);
     size_t shmSize = D * sizeof(float);
-
-    auto start = std::chrono::high_resolution_clock::now();
+    auto cpu_start = std::chrono::high_resolution_clock::now();
+    cpu_attention(h_Q, h_K, h_V, h_O_ref, h_L_ref, N, D);
+    auto cpu_end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> cpu_diff = cpu_end - cpu_start;
+    std::cout << "Tempo CPU: " << cpu_diff.count() << " s\n";
+    cudaEvent_t start, stop;
+    checkCuda(cudaEventCreate(&start));
+    checkCuda(cudaEventCreate(&stop));
+    checkCuda(cudaEventRecord(start));
     blockwise_attention_kernel<<<grid, block, shmSize>>>(d_Q, d_K, d_V, d_O, d_L, N, D, BC);
-    checkCuda(cudaDeviceSynchronize());
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> diff = end - start;
-    std::cout << "Tempo de execucao do kernel: " << diff.count() << " s\n";
-
+    checkCuda(cudaEventRecord(stop));
+    checkCuda(cudaEventSynchronize(stop));
+    float ms = 0;
+    checkCuda(cudaEventElapsedTime(&ms, start, stop));
+    std::cout << "Tempo GPU: " << ms/1000.0f << " s\n";
+    checkCuda(cudaEventDestroy(start));
+    checkCuda(cudaEventDestroy(stop));
     checkCuda(cudaMemcpy(h_O, d_O, sz*sizeof(float), cudaMemcpyDeviceToHost));
     checkCuda(cudaMemcpy(h_L, d_L, N*sizeof(float), cudaMemcpyDeviceToHost));
-    std::cout << "Primeiros 8 valores de O[0,:]:\n";
-    for (int c = 0; c < 8; c++) {
+    std::cout << "Primeiros 16 valores CPU O[0,:]:\n";
+    for (int c = 0; c < 16; c++) {
+        std::cout << h_O_ref[c] << " ";
+    }
+    std::cout << "\nCPU L[0] = " << h_L_ref[0] << "\n";
+    std::cout << "Primeiros 16 valores GPU O[0,:]:\n";
+    for (int c = 0; c < 16; c++) {
         std::cout << h_O[c] << " ";
     }
-    std::cout << "\nL[0] = " << h_L[0] << "\n";
+    std::cout << "\nGPU L[0] = " << h_L[0] << "\n";
     cudaFree(d_Q);
     cudaFree(d_K);
     cudaFree(d_V);
@@ -135,6 +193,7 @@ int main() {
     delete[] h_V;
     delete[] h_O;
     delete[] h_L;
-    std::cout << "Fim.\n";
+    delete[] h_O_ref;
+    delete[] h_L_ref;
     return 0;
 }
