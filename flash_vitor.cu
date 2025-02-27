@@ -4,7 +4,6 @@
 #include <cuda_runtime.h>
 #include <curand.h>
 #include <iostream>
-#include <chrono>
 
 inline void checkCuda(cudaError_t err, const char* msg = nullptr) {
     if (err != cudaSuccess) {
@@ -185,8 +184,68 @@ __global__ void optimized_attention(
     }
 }
 
+float dotProduct(const float* a, const float* b, size_t length) {
+    float produto = 0.0f;
+    for (size_t i = 0; i < length; ++i)
+        produto += a[i] * b[i];
+    return produto;
+}
+
+float* softmax(const float* scores, size_t n) {
+    float* exp_scores = new float[n];
+    float soma_exp = 0.0f;
+    for (size_t i = 0; i < n; ++i) {
+        exp_scores[i] = std::exp(scores[i]);
+        soma_exp += exp_scores[i];
+    }
+    for (size_t i = 0; i < n; ++i)
+        exp_scores[i] /= soma_exp;
+    return exp_scores;
+}
+
+void attention(const float* queries, size_t num_queries, size_t dim,
+               const float* keys, size_t num_keys,
+               const float* values, size_t value_dim,
+               float* output) {
+    for (size_t i = 0; i < num_queries; ++i) {
+        const float* query = queries + i * dim;
+        float escala = std::sqrt(static_cast<float>(dim));
+
+        float* scores = new float[num_keys];
+        for (size_t j = 0; j < num_keys; ++j) {
+            const float* key = keys + j * dim;
+            scores[j] = dotProduct(query, key, dim) / escala;
+        }
+
+        float* pesos = softmax(scores, num_keys);
+
+        float* out_query = output + i * value_dim;
+        for (size_t k = 0; k < value_dim; ++k)
+            out_query[k] = 0.0f;
+
+        for (size_t j = 0; j < num_keys; ++j) {
+            const float* value = values + j * value_dim;
+            for (size_t k = 0; k < value_dim; ++k)
+                out_query[k] += pesos[j] * value[k];
+        }
+
+        delete[] scores;
+        delete[] pesos;
+    }
+}
+
+bool compareMatrices(const float* matA, const float* matB, size_t rows, size_t cols, float tolerance = 1e-5f) {
+    size_t totalElements = rows * cols;
+    for (size_t i = 0; i < totalElements; ++i) {
+        if (std::fabs(matA[i] - matB[i]) > tolerance) {
+            return false;
+        }
+    }
+    return true;
+}
+
 int main() {
-    // Parâmetros – você pode ajustar conforme necessário
+    // Parâmetros - você pode ajustar conforme necessário
     static const int N  = 4096;   // número de queries/keys/values
     static const int D  = 4096;   // dimensão dos vetores
     static const int BC = 64;     // tile de keys
@@ -216,9 +275,11 @@ int main() {
     checkCuda(cudaEventCreate(&startRng));
     checkCuda(cudaEventCreate(&stopRng));
     checkCuda(cudaEventRecord(startRng));
+
     checkCurand(curandGenerateUniform(gen, d_Q, sz));
     checkCurand(curandGenerateUniform(gen, d_K, sz));
     checkCurand(curandGenerateUniform(gen, d_V, sz));
+
     checkCuda(cudaEventRecord(stopRng));
     checkCuda(cudaEventSynchronize(stopRng));
     float msRng = 0;
@@ -242,25 +303,49 @@ int main() {
     checkCuda(cudaEventCreate(&start));
     checkCuda(cudaEventCreate(&stop));
     checkCuda(cudaEventRecord(start));
+
+
     optimized_attention<<<gridDim, blockDim, sharedMemSize>>>(d_Q, d_K, d_V, d_O, d_L, N, D, BC);
+
     checkCuda(cudaEventRecord(stop));
-    checkCuda(cudaEventSyAchronize(stop));
+    checkCuda(cudaEventSynchronize(stop));
     float ms = 0;
     checkCuda(cudaEventElapsedTime(&ms, start, stop));
     std::cout << "Tempo GPU (kernel otimizado): " << ms / 1000.0f << " s\n";
+
     checkCuda(cudaEventDestroy(start));
     checkCuda(cudaEventDestroy(stop));
     
     // Copia os resultados para a CPU
     checkCuda(cudaMemcpy(h_O, d_O, sz * sizeof(float), cudaMemcpyDeviceToHost));
-    checkCuda(cudaMemcpy(h_L, d_L, N * sizeof(float), cudaMemcpyDeviceToHost));
     
     // Exibe alguns resultados para verificação
-    std::cout << "Exemplo dos primeiros 16 valores da saída da query 0 (O[0,:]):\n";
-    for (int c = 0; c < 16; c++) {
-        std::cout << h_O[c] << " ";
+    for (size_t i = 0; i < N; i+=200) {
+        std::cout << "Resultado da atenção para a GPU query " << i + 1 << ": ";
+        for (size_t j = 0; j < D; j+=200) {
+            std::cout << h_O[i * D + j] << " ";
+        }
+        std::cout << std::endl;
     }
-    std::cout << "\nL[0] = " << h_L[0] << "\n";
+
+    std::cout << std::endl << std::endl;
+    /*float output[N * D];
+
+    attention(h_Q, N, D, h_K, N, h_V, D, output);
+
+    for (size_t i = 0; i < N; i+=200) {
+        std::cout << "Resultado da atenção para a CPU query " << i + 1 << ": ";
+        for (size_t j = 0; j < D; j+=200) {
+            std::cout << h_O[i * D + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+
+    if (compareMatrices(output, h_O, N, D)) {
+        std::cout << "matrix1 e matrix2 são iguais." << std::endl;
+    } else {
+        std::cout << "matrix1 e matrix2 são diferentes." << std::endl;
+    } */
     
     // Libera memória
     cudaFree(d_Q);
