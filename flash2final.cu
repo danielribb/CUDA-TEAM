@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cmath>
 #include <cuda_runtime.h>
+#include <curand.h>
 #include <iostream>
 #include <chrono>
 
@@ -13,7 +14,16 @@ inline void checkCuda(cudaError_t err, const char* msg=nullptr) {
     }
 }
 
-__global__ void blockwise_attention_kernel(
+inline void checkCurand(curandStatus_t err, const char* msg=nullptr) {
+    if (err != CURAND_STATUS_SUCCESS) {
+        std::cerr << "CURAND error";
+        if (msg) std::cerr << " (" << msg << ")";
+        std::cerr << std::endl;
+        exit(1);
+    }
+}
+
+__global__ void forward2(
     const float* __restrict__ Q,
     const float* __restrict__ K,
     const float* __restrict__ V,
@@ -48,8 +58,8 @@ __global__ void blockwise_attention_kernel(
             sVals[b] = sum;
             if (sum > rowMax) rowMax = sum;
         }
-        float new_m = (rowMax > m_val) ? rowMax : m_val;
-        float rowSum = 0.0f;
+        float new_m = rowMax > m_val ? rowMax : m_val;
+        float rowSum = 0;
         for (int b = 0; b < curBc; b++) {
             float p = expf(sVals[b] - new_m);
             sVals[b] = p;
@@ -126,8 +136,8 @@ void cpu_attention(const float* Q, const float* K, const float* V, float* O, flo
 }
 
 int main() {
-    static const int N  = 1024;
-    static const int D  = 1024;
+    static const int N  = 4096;
+    static const int D  = 4096;
     static const int BC = 64;
     size_t sz = (size_t)N * D;
     float *h_Q = new float[sz];
@@ -137,33 +147,43 @@ int main() {
     float *h_L = new float[N];
     float *h_O_ref = new float[sz];
     float *h_L_ref = new float[N];
-    for (size_t i = 0; i < sz; i++) {
-        h_Q[i] = 1.0f + 0.00001f*(i % 104);
-        h_K[i] = 2.0f + 0.00002f*(i % 89);
-        h_V[i] = 3.0f + 0.00003f*(i % 125);
-    }
     float *d_Q, *d_K, *d_V, *d_O, *d_L;
     checkCuda(cudaMalloc(&d_Q, sz*sizeof(float)));
     checkCuda(cudaMalloc(&d_K, sz*sizeof(float)));
     checkCuda(cudaMalloc(&d_V, sz*sizeof(float)));
     checkCuda(cudaMalloc(&d_O, sz*sizeof(float)));
     checkCuda(cudaMalloc(&d_L, N*sizeof(float)));
-    checkCuda(cudaMemcpy(d_Q, h_Q, sz*sizeof(float), cudaMemcpyHostToDevice));
-    checkCuda(cudaMemcpy(d_K, h_K, sz*sizeof(float), cudaMemcpyHostToDevice));
-    checkCuda(cudaMemcpy(d_V, h_V, sz*sizeof(float), cudaMemcpyHostToDevice));
-    dim3 grid(N, 1, 1);
-    dim3 block(32, 1, 1);
-    size_t shmSize = D * sizeof(float);
-    auto cpu_start = std::chrono::high_resolution_clock::now();
-    cpu_attention(h_Q, h_K, h_V, h_O_ref, h_L_ref, N, D);
-    auto cpu_end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> cpu_diff = cpu_end - cpu_start;
-    std::cout << "Tempo CPU: " << cpu_diff.count() << " s\n";
+    curandGenerator_t gen;
+    checkCurand(curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT));
+    checkCurand(curandSetPseudoRandomGeneratorSeed(gen, 1234ULL));
+    cudaEvent_t startRng, stopRng;
+    checkCuda(cudaEventCreate(&startRng));
+    checkCuda(cudaEventCreate(&stopRng));
+    checkCuda(cudaEventRecord(startRng));
+    checkCurand(curandGenerateUniform(gen, d_Q, sz));
+    checkCurand(curandGenerateUniform(gen, d_K, sz));
+    checkCurand(curandGenerateUniform(gen, d_V, sz));
+    checkCuda(cudaEventRecord(stopRng));
+    checkCuda(cudaEventSynchronize(stopRng));
+    float msRng = 0;
+    checkCuda(cudaEventElapsedTime(&msRng, startRng, stopRng));
+    std::cout << "Tempo geracao RNG: " << msRng/1000.0f << " s\n";
+    checkCurand(curandDestroyGenerator(gen));
+    checkCuda(cudaEventDestroy(startRng));
+    checkCuda(cudaEventDestroy(stopRng));
+   // checkCuda(cudaMemcpy(h_Q, d_Q, sz*sizeof(float), cudaMemcpyDeviceToHost));
+   // checkCuda(cudaMemcpy(h_K, d_K, sz*sizeof(float), cudaMemcpyDeviceToHost));
+   // checkCuda(cudaMemcpy(h_V, d_V, sz*sizeof(float), cudaMemcpyDeviceToHost));
+    //auto cpu_start = std::chrono::high_resolution_clock::now();
+   // cpu_attention(h_Q, h_K, h_V, h_O_ref, h_L_ref, N, D);
+    //auto cpu_end = std::chrono::high_resolution_clock::now();
+   // std::chrono::duration<double> cpu_diff = cpu_end - cpu_start;
+   // std::cout << "Tempo CPU: " << cpu_diff.count() << " s\n";
     cudaEvent_t start, stop;
     checkCuda(cudaEventCreate(&start));
     checkCuda(cudaEventCreate(&stop));
     checkCuda(cudaEventRecord(start));
-    blockwise_attention_kernel<<<grid, block, shmSize>>>(d_Q, d_K, d_V, d_O, d_L, N, D, BC);
+    forward2<<<N, 32, D*sizeof(float)>>>(d_Q, d_K, d_V, d_O, d_L, N, D, BC);
     checkCuda(cudaEventRecord(stop));
     checkCuda(cudaEventSynchronize(stop));
     float ms = 0;
@@ -174,12 +194,12 @@ int main() {
     checkCuda(cudaMemcpy(h_O, d_O, sz*sizeof(float), cudaMemcpyDeviceToHost));
     checkCuda(cudaMemcpy(h_L, d_L, N*sizeof(float), cudaMemcpyDeviceToHost));
     std::cout << "Primeiros 16 valores CPU O[0,:]:\n";
-    for (int c = 0; c < 16; c++) {
-        std::cout << h_O_ref[c] << " ";
-    }
+  //  for (int c = 0; c < 32; c++) {
+   //     std::cout << h_O_ref[c] << " ";
+   // }
     std::cout << "\nCPU L[0] = " << h_L_ref[0] << "\n";
     std::cout << "Primeiros 16 valores GPU O[0,:]:\n";
-    for (int c = 0; c < 16; c++) {
+    for (int c = 0; c < 800; c++) {
         std::cout << h_O[c] << " ";
     }
     std::cout << "\nGPU L[0] = " << h_L[0] << "\n";
