@@ -299,19 +299,9 @@ void attention(const float* queries, size_t num_queries, size_t dim,
     }
 }
 
-bool compareMatrices(const float* matA, const float* matB, size_t rows, size_t cols, float tolerance = 1e-5f) {
-    size_t totalElements = rows * cols;
-    for (size_t i = 0; i < totalElements; ++i) {
-        if (std::fabs(matA[i] - matB[i]) > tolerance) {
-            return false;
-        }
-    }
-    return true;
-}
-
 int main() {
-    static const int N  = 4096; // número de queries
-    static const int D  = 4096; // dimensão
+    static const int N  = 1024; // número de queries
+    static const int D  = 1024; // dimensão
     static const int BC = 64;   // chunkSize
     size_t sz = (size_t)N * D;
     
@@ -343,7 +333,7 @@ int main() {
 
     // Lançamos os kernels
     // Exemplo: 1 bloco por linha (N blocos), 128 threads por bloco
-    const int threadsPerBlock = 128;
+    const int threadsPerBlock = 32;
     dim3 gridDim(N), blockDim(threadsPerBlock);
 
     // (Opcional) Criar eventos para medir tempo
@@ -355,20 +345,16 @@ int main() {
     // -------------------------
     // OPÇÃO A: Chamar cada kernel manualmente
     // -------------------------
-    fa2_pass1<<<32, 256>>>(d_Q, d_K, N, D, BC, d_L);
+    fa2_pass1<<<gridDim, blockDim>>>(d_Q, d_K, N, D, BC, d_L);
     checkCuda(cudaGetLastError());
     
-    fa2_pass1_sum<<<32, 256>>>(d_Q, d_K, N, D, BC, d_L);
+    fa2_pass1_sum<<<gridDim, blockDim>>>(d_Q, d_K, N, D, BC, d_L);
     checkCuda(cudaGetLastError());
     
-    fa2_pass2<<<32, 256>>>(d_Q, d_K, d_V, N, D, BC, d_O, d_L);
+    fa2_pass2<<<gridDim, blockDim>>>(d_Q, d_K, d_V, N, D, BC, d_O, d_L);
     checkCuda(cudaGetLastError());
 
-    // -------------------------
-    // OPÇÃO B: Usar a função encapsulada flash2_like
-    // (Se você tiver definido algo como flash2_like(...) que chama pass1, pass1_sum e pass2)
-    // -------------------------
-    // flash2_like(d_Q, d_K, d_V, d_O, d_L, N, D, BC, threadsPerBlock);
+    
 
     checkCuda(cudaDeviceSynchronize());
     checkCuda(cudaEventRecord(stop));
@@ -378,16 +364,35 @@ int main() {
 
     std::cout << "Tempo total GPU: " << ms/1000.0f << " s\n";
 
+    
+
     // Copia resultado
     checkCuda(cudaMemcpy(h_O, d_O, sz*sizeof(float), cudaMemcpyDeviceToHost));
-    checkCuda(cudaMemcpy(h_L, d_L, 2*N*sizeof(float), cudaMemcpyDeviceToHost));
+    checkCuda(cudaMemcpy(h_Q, d_Q, sz*sizeof(float), cudaMemcpyDeviceToHost));
+    checkCuda(cudaMemcpy(h_K, d_K, sz*sizeof(float), cudaMemcpyDeviceToHost));
+    checkCuda(cudaMemcpy(h_V, d_V, sz*sizeof(float), cudaMemcpyDeviceToHost));
 
-    // Exemplo: imprime alguns valores
-    std::cout << "Alguns valores O[0,:] = ";
-    for (int c = 0; c < 8; c++) {
-        std::cout << h_O[c] << " ";
+    for (size_t i = 0; i < N; i+=200) {
+        std::cout << "Resultado da atenção para a GPU query " << i + 1 << ": ";
+        for (size_t j = 0; j < D; j+=200) {
+            std::cout << h_O[i * D + j] << " ";
+        }
+        std::cout << std::endl;
     }
-    std::cout << "\nL[0] = " << h_L[0] << std::endl;
+    std::cout << std::endl << std::endl;
+
+    float output[N * D];
+
+    attention(h_Q, N, D, h_K, N, h_V, D, output);
+
+    for (size_t i = 0; i < N; i+=200) {
+        std::cout << "Resultado da atenção para a CPU query " << i + 1 << ": ";
+        for (size_t j = 0; j < D; j+=200) {
+            std::cout << output[i * D + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+
 
     // Libera
     delete[] h_Q;
