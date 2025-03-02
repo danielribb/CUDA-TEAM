@@ -1,0 +1,27 @@
+{
+    // Veja https://go.microsoft.com/fwlink/?LinkId=733558 para mais informações sobre o formato tasks.json
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build CUDA H100 with lcurand",
+            "type": "shell",
+            "command": "nvcc",
+            "args": [
+                "-arch=sm_90",         
+                "-O3",                 
+                "-use_fast_math",      
+                "-o", "flash",         
+                "flash.cu",            
+                "-lcurand"             
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "detail": "Compila código CUDA para GPU H100 com otimizações e linka com a biblioteca curand"
+        }
+    ]
+}
