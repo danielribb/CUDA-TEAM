@@ -1,17 +1,19 @@
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 from setuptools import setup
+from torch.utils.cpp_extension import CUDAExtension, BuildExtension, CppExtension
 
 setup(
-    name='flash_cuda',
+    name='custom_attention',
     ext_modules=[
         CUDAExtension(
-            name='flash_cuda',
-            sources=['flash.cu'],
-            extra_compile_args={
-                'cxx': [],
-                'nvcc': ['-O2']
-            }
-        )
+            name='custom_attention',
+            sources=[
+                'attention.cpp',         # Arquivo de ligação C++
+                'attention_cuda.cu',     # Arquivo CUDA
+            ],
+            extra_compile_args={'cxx': ['-O3'], 'nvcc': ['-O3']}
+        ),
     ],
-    cmdclass={'build_ext': BuildExtension}
+    cmdclass={
+        'build_ext': BuildExtension
+    }
 )
