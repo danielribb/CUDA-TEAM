@@ -1,29 +1,7 @@
 #include <torch/extension.h>
-#include <vector>
-#include <pybind11/pybind11.h>
 
-// Declarações das funções definidas em attention_cuda.cu
-std::vector<torch::Tensor> attention_forward(
-    torch::Tensor Q,
-    torch::Tensor K,
-    torch::Tensor V,
-    bool causal,
-    float softmax_scale
-);
+torch::Tensor fa2_forward(torch::Tensor q, torch::Tensor k, torch::Tensor v);
 
-std::vector<torch::Tensor> attention_backward(
-    torch::Tensor Q,
-    torch::Tensor K,
-    torch::Tensor V,
-    torch::Tensor O,
-    torch::Tensor M,
-    torch::Tensor dO,
-    bool causal,
-    float softmax_scale
-);
-
-// Ligação com PyBind11
-PYBIND11_MODULE(custom_attention, m) {
-    m.def("attention_forward", &attention_forward, "Attention forward (CUDA)");
-    m.def("attention_backward", &attention_backward, "Attention backward (CUDA)");
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("fa2_forward", torch::wrap_pybind_function(fa2_forward), "fa2_forward");
 }
