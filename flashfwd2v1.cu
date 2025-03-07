@@ -31,13 +31,7 @@ float random_normal_clamped(float min, float max) {
     return num;
 }
 
-/*
-Reduction functions on device. These will be inline:
-The compiler will replace the call with the code instead of calling the function (overhead)
-*/
-/*
-Utility warp level sum reduction with shuffle instructions
-*/
+
 
 __device__ __forceinline__ float warpReduceSum(float val, int width) {
     for (int offset = width / 2; offset > 0; offset /= 2) {
@@ -55,30 +49,20 @@ __device__ __forceinline__ float warpReduceMax(float val, int width) {
     return val;
 }
 
-/*
-This kernel uses flash attention algorithm to compute multi-head attention.
-Q, K, and V are 4D tensors of shape (batch_size, n_heads, seq_len, embed_dim).
-Additional inputs are Tr and Tc which are the tiles each block computes.
-The arrays l and m are to save the norm and maximum for the ith tile.
-SRAM will have size M and Br = ceil(M / 4d) and Bc = min(ceil(M / 4d), d)
-where M is the size of the SRAM.
-*/
+
 template <const int Br, const int Bc>
 __global__ void flash_attn_2_kernel(
     float* Q, float* K, float* V, int N, int d, 
     int Tr, int Tc, 
     float scale, float* L, float* O) {
-    int tx = threadIdx.x;  // Br * Bc threads
+    int tx = threadIdx.x; 
 
-    int bx = blockIdx.x;  // Batch index
-    int by = blockIdx.y;  // Head index
+    int bx = blockIdx.x;  
+    int by = blockIdx.y; 
 
-    // tip to calculate offset:
-    // count how many elements to skip in the array to reach an index
     int qkv_off = (bx * gridDim.y * N * d) + (by * N * d);
     int lm_off = (bx * gridDim.y * N) + (by * N);
 
-    // TODO: remove too much shared memory usage
     extern __shared__ float smem[];
     float* Qi = smem;
     float* Kj = Qi + Br * d;
@@ -93,7 +77,6 @@ __global__ void flash_attn_2_kernel(
     int loads_per_thread_Bcd = CEIL_DIV(d, Br);
 
     for (int i = 0; i < Tr; i++) {
-        // load Qi and Oi from HBM into SMEM
         for (int e = 0; e < loads_per_thread_Brd; e++) {
             int idx = e * (Br * Bc) + tx;
             int row = idx / d;
@@ -109,7 +92,6 @@ __global__ void flash_attn_2_kernel(
 
         int global_row = (i * Br) + s_row;
 
-        // init li and mi for each row
         if (s_col == 0) {
             li[s_row] = 0.f;
             mi[s_row] = -INFINITY;
@@ -118,7 +100,6 @@ __global__ void flash_attn_2_kernel(
         __syncthreads();
 
         for (int j = 0; j < Tc; j++) {
-            // load Kj and Vj into SMEM from HBM
             for (int e = 0; e < loads_per_thread_Bcd; e++) {
                 int idx = e * (Br * Bc) + tx;
                 int row = idx / d;
@@ -130,8 +111,7 @@ __global__ void flash_attn_2_kernel(
             }
             __syncthreads();
 
-            // compute S = Qi * Kj^T where shape of S: (Br, Bc)
-            // TODO: reduce shared memory bank conflicts
+
             float acc = 0.f;
             for (int k = 0; k < d; k++)
                 acc += Qi[s_row * d + k] * Kj[s_col * d + k];
@@ -139,8 +119,7 @@ __global__ void flash_attn_2_kernel(
             acc *= scale;
             Sij[s_row * Bc + s_col] = acc;
 
-            // rowmax(S) and rowsum(S) (only one thread per row)
-            // computes both in a single pass
+
             if (s_col == 0) {
                 mi[s_row] = mi_new[s_row];
                 float row_m = -INFINITY, row_l = 0.f;
@@ -157,9 +136,9 @@ __global__ void flash_attn_2_kernel(
                     float exp_val = expf(Sij[s_row * Bc + c] - maxval);
                     Sij[s_row * Bc + c] = exp_val;
 
-                    float y = exp_val - kahan_comp;  // subtract the compensation from the new value
-                    float t = row_l + y;             // add the compensated value to the sum
-                    kahan_comp = (t - row_l) - y;    // compute the new compensation.
+                    float y = exp_val - kahan_comp;  
+                    float t = row_l + y;             
+                    kahan_comp = (t - row_l) - y;   
                     row_l = t;
                 }
 
@@ -168,9 +147,6 @@ __global__ void flash_attn_2_kernel(
             }
             __syncthreads();
 
-            // compute Sij * Vj and do a roll-forward update to O
-            // Sij (Br, Bc) and Vj (Bc, d) and we have Br * Bc threads
-            // a thread may compute more than one element's dot product
             for (int col = s_col; col < d; col += Bc) {
                 float acc = 0.f;
                 float kahan_comp = 0.f;
@@ -199,11 +175,9 @@ __global__ void flash_attn_2_kernel(
     }
 }
 
-// Comment the below function to compile and run this file as executable
 torch::Tensor fa2_forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V) {
-    // TODO: determine Bc, Br dynamically
-    const int Bc = 16;
-    const int Br = 16;
+    const int Bc = 32;
+    const int Br = 32;
 
     int B = Q.size(0);
     int nh = Q.size(1);
@@ -214,7 +188,6 @@ torch::Tensor fa2_forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V) {
     int Tr = ceil((float)N / Br);
     float softmax_scale = 1.0 / sqrt(d);
 
-    // Initialize O, l, m to HBM
     auto O = torch::zeros_like(Q);
     auto L = torch::zeros({B, nh, N});
     torch::Device device(torch::kCUDA);
@@ -225,8 +198,8 @@ torch::Tensor fa2_forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V) {
     cudaDeviceGetAttribute(&max_sram_size, cudaDevAttrMaxSharedMemoryPerBlock, 0);
     printf("Max shared memory: %d, requested shared memory: %d \n", max_sram_size, smem_size);
 
-    dim3 grid_size(B, nh);     // batch_size x num_heads
-    dim3 block_size(Br * Bc);  // Br * Bc threads per block
+    dim3 grid_size(B, nh);     
+    dim3 block_size(Br * Bc);  
 
     flash_attn_2_kernel<Br, Bc><<<grid_size, block_size, smem_size>>>(
         Q.data_ptr<float>(), K.data_ptr<float>(), V.data_ptr<float>(),
