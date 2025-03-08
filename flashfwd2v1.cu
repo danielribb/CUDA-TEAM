@@ -20,18 +20,6 @@ inline void cudaAssert(cudaError_t code, const char* file, int line) {
 #define CEIL_DIV(x, y) ((x) >= 0 ? (((x) + (y) - 1) / (y)) : ((x) / (y)))
 #define PI 3.1415
 
-float random_normal_clamped(float min, float max) {
-    float u1 = (float)rand() / RAND_MAX;
-    float u2 = (float)rand() / RAND_MAX;
-    float num = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * PI * u2);
-    if (num < min)
-        return min;
-    if (num > max)
-        return max;
-    return num;
-}
-
-
 
 __device__ __forceinline__ float warpReduceSum(float val, int width) {
     for (int offset = width / 2; offset > 0; offset /= 2) {
